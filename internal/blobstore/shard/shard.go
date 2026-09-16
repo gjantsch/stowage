@@ -1,21 +1,43 @@
 package shard
 
 import (
-	"fmt"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/gjantsch/stowage/pkg/blobstore"
 )
 
-func Get(hash blobstore.Hash32, length int) string {
-	if len(hash) < length*2 {
-		return ""
+const (
+	DirChars  = 2 // hex characters per directory level
+	DirDepth  = 2
+)
+
+type Shard struct {
+	Hash    blobstore.Hash32
+	RootDir string
+}
+
+func NewShard(hash blobstore.Hash32, rootDir string) *Shard {
+	return &Shard{
+		Hash:    hash,
+		RootDir: rootDir,
 	}
-	result := ""
-	for i := 0; i < length; i = i + 2 {
-		if i > 0 {
-			result += "/"
-		}
-		result += fmt.Sprintf("%s", hash[i:i+2])
+}
+
+func (s *Shard) Path() string {
+	parts := [DirDepth]string{}
+	root := s.RootDir
+	pathSeparator := string(os.PathSeparator)
+	encoded := hex.EncodeToString(s.Hash[:])
+
+	if len(root) > 0 && !strings.HasSuffix(root, pathSeparator) {
+		root += pathSeparator
 	}
-	return result
+
+	for i := range DirDepth {
+		parts[i] = encoded[i*DirChars : (i+1)*DirChars]
+	}
+	return filepath.Join(root, strings.Join(parts[:], pathSeparator), encoded+".bin")
 }
