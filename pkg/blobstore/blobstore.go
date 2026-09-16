@@ -49,6 +49,6 @@ type BlobStore interface {
 	Erase(ctx context.Context, hash Hash32) error
 	GC(ctx context.Context) (int, error)
 }
-te
+
 var ErrNotFound = errors.New("blob not found")
 var ErrHashMismatch = errors.New("stored hash does not match content")
