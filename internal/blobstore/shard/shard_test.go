@@ -28,27 +28,27 @@ func TestPath(t *testing.T) {
 		{
 			name:    "empty root dir",
 			rootDir: "",
-			want:    "01/23/" + testHex + ".bin",
+			want:    "01/23",
 		},
 		{
 			name:    "root dir without trailing slash",
 			rootDir: "/data",
-			want:    "/data/01/23/" + testHex + ".bin",
+			want:    "/data/01/23",
 		},
 		{
 			name:    "root dir with trailing slash",
 			rootDir: "/data/",
-			want:    "/data/01/23/" + testHex + ".bin",
+			want:    "/data/01/23",
 		},
 		{
 			name:    "relative root dir",
 			rootDir: "data/",
-			want:    "data/01/23/" + testHex + ".bin",
+			want:    "data/01/23",
 		},
 		{
 			name:    "slash only root dir",
 			rootDir: "/",
-			want:    "/01/23/" + testHex + ".bin",
+			want:    "/01/23",
 		},
 	}
 
@@ -66,10 +66,49 @@ func TestPath_NoCollision(t *testing.T) {
 	hashA := hashFromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	hashB := hashFromHex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
 
-	pathA := NewShard(hashA, "/data").Path()
-	pathB := NewShard(hashB, "/data").Path()
+	if NewShard(hashA, "/data").Path() == NewShard(hashB, "/data").Path() {
+		t.Error("collision: two different hashes produced the same path")
+	}
+}
 
-	if pathA == pathB {
-		t.Errorf("collision: two different hashes produced the same path %q", pathA)
+func TestFilePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		rootDir string
+		want    string
+	}{
+		{
+			name:    "empty root dir",
+			rootDir: "",
+			want:    "01/23/" + testHex + ".bin",
+		},
+		{
+			name:    "root dir without trailing slash",
+			rootDir: "/data",
+			want:    "/data/01/23/" + testHex + ".bin",
+		},
+		{
+			name:    "root dir with trailing slash",
+			rootDir: "/data/",
+			want:    "/data/01/23/" + testHex + ".bin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewShard(hashFromHex(testHex), tt.rootDir)
+			if got := s.FilePath(); got != tt.want {
+				t.Errorf("FilePath() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFilePath_NoCollision(t *testing.T) {
+	hashA := hashFromHex("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	hashB := hashFromHex("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+	if NewShard(hashA, "/data").FilePath() == NewShard(hashB, "/data").FilePath() {
+		t.Error("collision: two different hashes produced the same file path")
 	}
 }
