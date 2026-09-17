@@ -87,6 +87,30 @@ func TestSweep_Subdirectories(t *testing.T) {
 	}
 }
 
+func TestSweep_RemovesLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+
+	keep := filepath.Join(dir, "abc123.000.bin")
+	if err := os.WriteFile(keep, []byte("blob"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "_lock_abc123"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := gc.Sweep(ctx, dir)
+	if err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted %d, want 1", deleted)
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("committed blob removed by GC: %v", err)
+	}
+}
+
 func TestSweep_Empty(t *testing.T) {
 	dir := t.TempDir()
 	deleted, err := gc.Sweep(context.Background(), dir)

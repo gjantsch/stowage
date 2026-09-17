@@ -26,11 +26,12 @@ func Sweep(ctx context.Context, rootDir string) (int, error) {
 		if d.IsDir() {
 			return nil
 		}
-		if !strings.HasPrefix(d.Name(), "_tmp_") {
+		name := d.Name()
+		if !strings.HasPrefix(name, "_tmp_") && !strings.HasPrefix(name, "_lock_") {
 			return nil
 		}
 		if rmErr := os.Remove(path); rmErr != nil {
-			slog.ErrorContext(ctx, "gc: failed to remove staging file",
+			slog.ErrorContext(ctx, "gc: failed to remove orphan file",
 				"path", path,
 				"error", rmErr,
 			)
@@ -39,7 +40,7 @@ func Sweep(ctx context.Context, rootDir string) (int, error) {
 			}
 			return nil
 		}
-		slog.InfoContext(ctx, "gc: removed staging file",
+		slog.InfoContext(ctx, "gc: removed orphan file",
 			"path", path,
 		)
 		deleted++

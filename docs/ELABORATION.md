@@ -126,9 +126,10 @@ Built on top of DocumentEngine. Two separate interfaces:
 
 The physical engine manages how files sit on the drive to prevent operating system slowdowns.
 
-- **Path Sharding:** Files are split across subdirectories based on their cryptographic hashes (e.g., `/data/4a/f3/4af36c.dat`). This keeps folders small and avoids OS folder file-limit crashes.
-- **Atomic Writing:** Files are written to a temporary `staging/` folder first. Once the upload finishes completely, the engine performs an atomic filesystem swap to move it to its permanent location. This prevents file corruption from partial uploads.
-- ** File Chunking:** Files may be stored in chunks scattered on different folders. This will be an optional feature and is defined on the storage process.
+- **Path Sharding:** Files are split across subdirectories based on their cryptographic hashes (e.g., `/data/4a/f3/4af36c.000.bin`). This keeps folders small and avoids OS folder file-limit crashes.
+- **Numbered slots:** Because Layer 0 performs no cross-call deduplication, the same hash can be stored multiple times. Each copy occupies a numbered slot: `<hex>.000.bin`, `<hex>.001.bin`, …, `<hex>.999.bin` (up to 1 000 copies). The slot number is zero-padded to three digits so lexicographic order matches numeric order.
+- **Atomic Writing:** Files are written to a temporary file named `_tmp_<uuid>` in the root directory first. Once the write completes and the hash is computed the file is renamed atomically to its final sharded slot path. This prevents corruption from partial writes.
+- **File Chunking:** Files may be stored in chunks scattered on different folders. This will be an optional feature and is defined on the storage process.
 
 ### Core Engine API (The Internal Contract)
 
@@ -139,41 +140,64 @@ The storage engine runs as an isolated subsystem using a strict programming inte
 **`Store()` — synchronous, atomic, leave-no-trash guarantee**
 
 `Store()` generates a UUID at the start of the operation and writes to a
-temporary file named `_tmp_<uuid>` in the staging area. The content is
+temporary file named `_tmp_<uuid>` in the root directory. The content is
 streamed and hashed on the fly — the hash is not known until the write
 completes. Only when the stream is fully written and the hash computed is
-the file renamed to its final sharded path. On any failure, the
+the file renamed to its final sharded slot path. On any failure, the
 `_tmp_<uuid>` file is deleted before the error is returned. The caller is
 guaranteed that either the file is fully committed or nothing is written —
 there is no partial state left on disk.
 
-For chunked files, each chunk follows the same `_tmp_<uuid>` pattern
-individually, but none of the chunks are moved to their final sharded
-location until all chunks of the file have been successfully written and
-hashed. If any single chunk fails, all staging files for that operation are
-cleaned up and the error is returned. The file is either fully committed as
-a complete set of chunks or not committed at all.
+**Slot assignment.** Before renaming, `Store()` acquires an advisory lock file
+`_lock_<hex>` in the shard directory using an atomic `O_CREATE|O_EXCL` open
+(safe on POSIX and Windows). It then scans for the lowest free slot number and
+renames the staging file to `<hex>.<NNN>.bin`. The lock is removed after the
+rename. If the lock already exists (another process is writing the same hash),
+`Store()` skips staging and returns the hash immediately — the content is
+identical by definition of the hash, so the other process's result is equally
+valid.
 
-The `_tmp_` prefix makes leftovers trivially identifiable by the GC: any file
-matching `_tmp_*` in the storage tree is a failed or interrupted write and
-safe to delete.
+**No cross-call deduplication (default).** `Store()` does not check whether a slot for
+this hash already exists. Each call always writes a new copy. Deduplication is
+a higher-layer concern (REST API server). This keeps Layer 0 stateless and
+makes `Erase()` unconditionally safe — each caller owns its own slot.
+
+**Deduplication mode (opt-in).** When `Config.Deduplicate` is `true`, `Store()`
+checks whether slot 0 already exists after computing the hash and creating the
+shard directory. If slot 0 is present, the staging file is discarded and the
+hash is returned immediately — no new slot is written. This is safe because all
+slots hold identical content. The check occurs before lock acquisition: once
+slot 0 exists the decision is final. Default is `false`.
+
+For chunked files (Layer 1), each chunk follows the same `_tmp_<uuid>` →
+lock → slot-rename pattern individually. None of the chunks are moved to their
+final sharded location until all chunks of the file have been successfully
+written and hashed. If any single chunk fails, all staging files for that
+operation are cleaned up and the error is returned.
+
+The `_tmp_` and `_lock_` prefixes make orphan files trivially identifiable by
+the GC: any file matching `_tmp_*` or `_lock_*` in the storage tree is a
+failed or interrupted write and safe to delete.
 
 **`Retrieve()` — returns not-found for any non-committed file**
 
-`Retrieve()` only resolves files at their final sharded path. A file still
-in staging (i.e. named `_tmp_<hash>`) is treated as non-existent and returns
-a not-found error. This is safe by design: `Store()` is synchronous, so a
-caller that received a successful return from `Store()` is guaranteed the file
-is committed and retrievable. A staging file visible to `Retrieve()` would
-only occur due to a crash, and in that case the correct response is not-found.
+`Retrieve()` always opens slot 0 (`<hex>.000.bin`). It never scans staging or
+other slots. Because all slots hold identical content, opening the lowest
+(oldest) copy is always correct. A file still in staging (`_tmp_*`) or a
+non-existent hash returns `ErrNotFound`. This is safe by design: `Store()` is
+synchronous, so a caller that received a successful return from `Store()` is
+guaranteed slot 0 is committed and retrievable.
 
-**`Erase()` — synchronous hard delete**
+**`Erase()` — LIFO hard delete**
 
-`Erase()` immediately removes the file from disk and returns only after the
-deletion is confirmed. There is no soft-delete or deferred removal at this
-layer. Higher-level systems (such as the REST API server) that need soft-delete
-semantics must implement them in their own metadata layer and call `Erase()`
-only when the hard delete is appropriate.
+`Erase()` scans the shard directory for the highest-numbered slot and removes
+it, then returns. This is a LIFO (last-in, first-out) strategy: the most
+recently written copy is removed first, and `Retrieve()` continues to serve
+slot 0 until it is the last copy and is itself erased. There is no soft-delete
+or deferred removal at this layer. Calling `Erase()` when no slot exists
+returns `ErrNotFound`. Higher-level systems that need soft-delete semantics
+must implement them in their own metadata layer and call `Erase()` only when
+the hard delete is appropriate.
 
 ---
 
@@ -197,7 +221,11 @@ embedded transactional database like **SQLite** or **RocksDB**.
 - **State Separation:** The database tracks if a file is `STAGING`, `ACTIVE`, or `DELETED`.
 - **Data Deduplication:** By indexing files by their hash, the server can detect
   if the exact same file is uploaded twice and point both metadata records to a
-  single physical file on disk to save space.
+  single physical file on disk to save space. Because Layer 0 stores each call
+  as a separate slot (no cross-call dedup), the server implements dedup by
+  calling `BlobStore.Store()` once and recording that single slot in every
+  metadata record that references the content. When the last reference is
+  removed the server calls `BlobStore.Erase()` to reclaim the slot.
 - **Manifest Storage:** The `Manifest` produced by Layer 1 is persisted in the
   database on behalf of the authenticated user, removing the need for the caller
   to manage the manifest file manually.

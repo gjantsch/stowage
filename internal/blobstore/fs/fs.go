@@ -17,15 +17,20 @@ import (
 )
 
 type FS struct {
-	RootDir string
+	RootDir     string
+	Deduplicate bool
 }
 
 func NewFS(rootDir string) *FS {
 	return &FS{RootDir: rootDir}
 }
 
+func NewFSWithConfig(cfg blobstore.Config) *FS {
+	return &FS{RootDir: cfg.RootDir, Deduplicate: cfg.Deduplicate}
+}
+
 func (f *FS) Store(ctx context.Context, r io.Reader) (blobstore.Hash32, error) {
-	stager := staging.NewStager(f.RootDir, f.RootDir)
+	stager := staging.NewStager(f.RootDir, f.RootDir, f.Deduplicate)
 	hash, err := stager.Stage(r, sha256.New())
 	if err != nil {
 		slog.ErrorContext(ctx, "store: failed",
@@ -34,7 +39,9 @@ func (f *FS) Store(ctx context.Context, r io.Reader) (blobstore.Hash32, error) {
 		)
 		return blobstore.Hash32{}, err
 	}
-	path := shard.NewShard(hash, f.RootDir).FilePath()
+	sh := shard.NewShard(hash, f.RootDir)
+	slot, _ := sh.HighestSlot()
+	path := sh.FilePathAt(slot)
 	info, statErr := os.Stat(path)
 	size := int64(-1)
 	if statErr == nil {
@@ -42,6 +49,7 @@ func (f *FS) Store(ctx context.Context, r io.Reader) (blobstore.Hash32, error) {
 	}
 	slog.InfoContext(ctx, "store: ok",
 		"hash", hex.EncodeToString(hash[:]),
+		"slot", slot,
 		"path", path,
 		"size", size,
 	)
@@ -49,7 +57,8 @@ func (f *FS) Store(ctx context.Context, r io.Reader) (blobstore.Hash32, error) {
 }
 
 func (f *FS) Retrieve(ctx context.Context, hash blobstore.Hash32) (io.ReadCloser, error) {
-	path := shard.NewShard(hash, f.RootDir).FilePath()
+	// Always open slot 0 — all slots hold identical content.
+	path := shard.NewShard(hash, f.RootDir).FilePathAt(0)
 	file, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -80,18 +89,22 @@ func (f *FS) Retrieve(ctx context.Context, hash blobstore.Hash32) (io.ReadCloser
 }
 
 func (f *FS) Erase(ctx context.Context, hash blobstore.Hash32) error {
-	path := shard.NewShard(hash, f.RootDir).FilePath()
-	err := os.Remove(path)
-	if err != nil {
+	sh := shard.NewShard(hash, f.RootDir)
+	slot, ok := sh.HighestSlot()
+	if !ok {
+		slog.InfoContext(ctx, "erase: not found",
+			"hash", hex.EncodeToString(hash[:]),
+		)
+		return fmt.Errorf("%w", blobstore.ErrNotFound)
+	}
+	path := sh.FilePathAt(slot)
+	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			slog.InfoContext(ctx, "erase: not found",
-				"hash", hex.EncodeToString(hash[:]),
-				"path", path,
-			)
 			return fmt.Errorf("%w", blobstore.ErrNotFound)
 		}
 		slog.ErrorContext(ctx, "erase: failed",
 			"hash", hex.EncodeToString(hash[:]),
+			"slot", slot,
 			"path", path,
 			"error", err,
 		)
@@ -99,6 +112,7 @@ func (f *FS) Erase(ctx context.Context, hash blobstore.Hash32) error {
 	}
 	slog.InfoContext(ctx, "erase: ok",
 		"hash", hex.EncodeToString(hash[:]),
+		"slot", slot,
 		"path", path,
 	)
 	return nil

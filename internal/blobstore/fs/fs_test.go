@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	blobfs "github.com/gjantsch/stowage/internal/blobstore/fs"
+	"github.com/gjantsch/stowage/internal/blobstore/shard"
 	"github.com/gjantsch/stowage/pkg/blobstore"
 )
 
@@ -83,6 +84,7 @@ func TestRetrieve_StagingFile_NotReturned(t *testing.T) {
 		t.Fatalf("Store: %v", err)
 	}
 
+	// Plant a _tmp_ file in the root — Retrieve must ignore it.
 	tmpPath := filepath.Join(dir, "_tmp_fakeuuid")
 	if err := os.WriteFile(tmpPath, []byte("impostor"), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -99,6 +101,58 @@ func TestRetrieve_StagingFile_NotReturned(t *testing.T) {
 	_, err = store.Retrieve(ctx, h)
 	if !errors.Is(err, blobstore.ErrNotFound) {
 		t.Errorf("expected ErrNotFound for unstaged hash, got %v", err)
+	}
+}
+
+func TestStore_NoDedupByDefault_WritesNewSlot(t *testing.T) {
+	dir := t.TempDir()
+	store := blobfs.NewFS(dir) // Deduplicate defaults to false
+	ctx := context.Background()
+
+	content := "no dedup default"
+	hash, err := store.Store(ctx, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("first Store: %v", err)
+	}
+	_, err = store.Store(ctx, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("second Store: %v", err)
+	}
+
+	// Both slot 0 and slot 1 must exist.
+	sh := shard.NewShard(hash, dir)
+	if _, err := os.Stat(sh.FilePathAt(0)); err != nil {
+		t.Errorf("slot 0 missing: %v", err)
+	}
+	if _, err := os.Stat(sh.FilePathAt(1)); err != nil {
+		t.Errorf("slot 1 missing (no-dedup should write new slot): %v", err)
+	}
+}
+
+func TestStore_Dedup_SkipsSecondWrite(t *testing.T) {
+	dir := t.TempDir()
+	store := &blobfs.FS{RootDir: dir, Deduplicate: true}
+	ctx := context.Background()
+
+	content := "dedup content"
+	hash, err := store.Store(ctx, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("first Store: %v", err)
+	}
+	hash2, err := store.Store(ctx, strings.NewReader(content))
+	if err != nil {
+		t.Fatalf("second Store: %v", err)
+	}
+	if hash != hash2 {
+		t.Errorf("hashes differ: %x vs %x", hash, hash2)
+	}
+
+	sh := shard.NewShard(hash, dir)
+	if _, err := os.Stat(sh.FilePathAt(0)); err != nil {
+		t.Errorf("slot 0 missing: %v", err)
+	}
+	if _, err := os.Stat(sh.FilePathAt(1)); err == nil {
+		t.Errorf("slot 1 should not exist in dedup mode")
 	}
 }
 
@@ -119,6 +173,41 @@ func TestErase_RemovesFile(t *testing.T) {
 	_, err = store.Retrieve(ctx, hash)
 	if !errors.Is(err, blobstore.ErrNotFound) {
 		t.Errorf("after Erase: expected ErrNotFound, got %v", err)
+	}
+}
+
+func TestErase_LIFO(t *testing.T) {
+	dir := t.TempDir()
+	store := blobfs.NewFS(dir)
+	ctx := context.Background()
+
+	content := strings.NewReader("lifo content")
+	hash, err := store.Store(ctx, content)
+	if err != nil {
+		t.Fatalf("first Store: %v", err)
+	}
+	_, err = store.Store(ctx, strings.NewReader("lifo content"))
+	if err != nil {
+		t.Fatalf("second Store: %v", err)
+	}
+
+	// Erase should remove slot 1 (highest), slot 0 still retrievable.
+	if err := store.Erase(ctx, hash); err != nil {
+		t.Fatalf("first Erase: %v", err)
+	}
+	rc, err := store.Retrieve(ctx, hash)
+	if err != nil {
+		t.Fatalf("Retrieve after first Erase: %v", err)
+	}
+	rc.Close()
+
+	// Second erase removes slot 0.
+	if err := store.Erase(ctx, hash); err != nil {
+		t.Fatalf("second Erase: %v", err)
+	}
+	_, err = store.Retrieve(ctx, hash)
+	if !errors.Is(err, blobstore.ErrNotFound) {
+		t.Errorf("after both erases: expected ErrNotFound, got %v", err)
 	}
 }
 
@@ -160,7 +249,6 @@ func TestGC_RemovesStagingFiles(t *testing.T) {
 	store := blobfs.NewFS(dir)
 	ctx := context.Background()
 
-	// Plant two staging files.
 	for _, name := range []string{"_tmp_aaa", "_tmp_bbb"} {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte("leftover"), 0644); err != nil {
@@ -181,6 +269,25 @@ func TestGC_RemovesStagingFiles(t *testing.T) {
 		if strings.HasPrefix(e.Name(), "_tmp_") {
 			t.Errorf("staging file still present after GC: %s", e.Name())
 		}
+	}
+}
+
+func TestGC_RemovesLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	store := blobfs.NewFS(dir)
+	ctx := context.Background()
+
+	p := filepath.Join(dir, "_lock_deadbeef")
+	if err := os.WriteFile(p, []byte(""), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	deleted, err := store.GC(ctx)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("GC deleted %d files, want 1", deleted)
 	}
 }
 

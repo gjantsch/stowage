@@ -36,9 +36,12 @@ func (h *Hash32) UnmarshalJSON(data []byte) error {
 // Config represents the configuration for a BlobStore.
 // RootDir specifies the root directory for storing blobs.
 // ChunkSize specifies the size of each chunk when storing blobs.
+// Deduplicate, when true, causes Store to skip writing when slot 0 already
+// exists for the computed hash — identical content is never written twice.
 type Config struct {
-	RootDir   string
-	ChunkSize int64
+	RootDir     string
+	ChunkSize   int64
+	Deduplicate bool
 }
 
 // BlobStore represents a storage system for blobs

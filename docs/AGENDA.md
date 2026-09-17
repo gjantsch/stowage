@@ -30,30 +30,40 @@ opaque blobs on disk with atomicity and path sharding.
 
 **1.4 — Atomic write (`Store`)**
 - Implement `internal/blobstore/staging` — write to `_tmp_<uuid>`, stream
-  and hash on the fly, rename to final sharded path on success
+  and hash on the fly
+- Acquire `_lock_<hex>` with `O_CREATE|O_EXCL` before rename; release after
+- Scan for lowest free slot (`<hex>.<NNN>.bin`, zero-padded 3 digits, max 999)
+  and rename staging file to that slot
+- If lock already held by another process, skip staging and return hash
 - On any failure: delete `_tmp_<uuid>` before returning error
-- Integration tests: store succeeds → file at sharded path; store fails
+- Integration tests: store succeeds → file at `<hex>.000.bin`; same content
+  stored twice → `<hex>.000.bin` and `<hex>.001.bin` both present; store fails
   mid-write → no file left on disk
 
 **1.5 — Retrieve**
-- Implement `Retrieve` — open a read stream at the sharded path
-- Returns `ErrNotFound` for any file not at its final path (including `_tmp_*`)
+- Implement `Retrieve` — always open slot 0 (`<hex>.000.bin`) directly; no
+  directory scan needed
+- Returns `ErrNotFound` for any file not at slot 0 (including `_tmp_*`,
+  `_lock_*`, and higher slots)
 - Integration tests: retrieve after store returns identical bytes; retrieve
   unknown hash returns `ErrNotFound`
 
 **1.6 — Erase**
-- Implement `Erase` — synchronous hard delete
-- Returns `ErrNotFound` if the hash does not exist
-- Integration tests: erase after store removes the file; double erase returns
-  `ErrNotFound`
+- Implement `Erase` — LIFO hard delete: scan shard dir for highest slot and
+  remove it; `Retrieve` continues serving slot 0 until it is the last copy
+- Returns `ErrNotFound` if no slot exists for the hash
+- Integration tests: erase after single store removes the file; two stores
+  then erase removes slot 1, slot 0 still retrievable; second erase removes
+  slot 0; double erase on empty returns `ErrNotFound`
 
 **1.7 — Garbage collector**
 - Implement `internal/blobstore/gc` — scan storage tree, delete any file
-  matching `_tmp_*`
+  matching `_tmp_*` (failed staging) or `_lock_*` (stale lock from crashed
+  process)
 - Expose `GC(ctx context.Context) (deleted int, err error)` on the `BlobStore`
   interface
-- Integration tests: leftover `_tmp_*` files are removed; committed blobs
-  are untouched
+- Integration tests: leftover `_tmp_*` and `_lock_*` files are removed;
+  committed blobs (`<hex>.<NNN>.bin`) are untouched
 
 **1.8 — Observability**
 - Add `slog` structured logging to all operations: store, retrieve, erase, gc
