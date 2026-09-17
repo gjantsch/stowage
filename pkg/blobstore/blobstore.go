@@ -8,8 +8,9 @@ import (
 	"io"
 )
 
-// Hash32 is a 32-byte digest. It implements MarshalJSON/UnmarshalJSON
-// using lowercase hex encoding for human-readable manifests.
+// Hash32 is a 32-byte digest. It implements MarshalJSON/UnmarshalJSON and
+// MarshalText/UnmarshalText using lowercase hex encoding for human-readable
+// manifests. The text encoding is used by yaml.v3 automatically.
 type Hash32 [32]byte
 
 // MarshalJSON implements the json.Marshaler interface.
@@ -23,6 +24,24 @@ func (h *Hash32) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("Hash32: expected a JSON string")
 	}
 	b, err := hex.DecodeString(string(data[1 : len(data)-1]))
+	if err != nil {
+		return fmt.Errorf("Hash32: invalid hex: %w", err)
+	}
+	if len(b) != 32 {
+		return fmt.Errorf("Hash32: expected 32 bytes, got %d", len(b))
+	}
+	copy(h[:], b)
+	return nil
+}
+
+// MarshalText implements encoding.TextMarshaler (used by yaml.v3).
+func (h Hash32) MarshalText() ([]byte, error) {
+	return []byte(hex.EncodeToString(h[:])), nil
+}
+
+// UnmarshalText implements encoding.TextUnmarshaler (used by yaml.v3).
+func (h *Hash32) UnmarshalText(text []byte) error {
+	b, err := hex.DecodeString(string(text))
 	if err != nil {
 		return fmt.Errorf("Hash32: invalid hex: %w", err)
 	}
