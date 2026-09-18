@@ -9,7 +9,7 @@ import (
 
 type BLAKE3Hasher struct{}
 
-func NewBLAKE3() BLAKE3Hasher {
+func NewBLAKE3() Hasher {
 	return BLAKE3Hasher{}
 }
 

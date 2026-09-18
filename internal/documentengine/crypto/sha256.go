@@ -9,7 +9,7 @@ import (
 
 type SHA256Hasher struct{}
 
-func NewSHA256() SHA256Hasher {
+func NewSHA256() Hasher {
 	return SHA256Hasher{}
 }
 
