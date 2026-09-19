@@ -148,7 +148,7 @@ the `Manifest` as JSON or YAML, enabling store and restore from the terminal.
 
 **3.1 — CLI scaffold**
 - Create `cmd/stowage/main.go` entry point
-- Add `cobra` (or stdlib `flag`) for subcommand routing
+- Add stdlib `flag` for subcommand routing
 - Subcommands: `store`, `retrieve`, `erase`, `gc`
 
 **3.2 — `store` command**
