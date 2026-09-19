@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"fmt"
 	"io"
 
 	"github.com/gjantsch/stowage/internal/manifest"
@@ -24,4 +25,15 @@ type Encryptor interface {
 
 	// Algorithm returns the EncryptionType constant for the Manifest.
 	Algorithm() manifest.EncryptionType
+}
+
+func NewEncryptor(t manifest.EncryptionType) (Encryptor, error) {
+	switch t {
+	case manifest.EncryptionNone:
+		return NewNone(), nil
+	case manifest.EncryptionAES256:
+		return NewAES256GCM(), nil
+	default:
+		return nil, fmt.Errorf("unsupported encryption type: %v", t)
+	}
 }
