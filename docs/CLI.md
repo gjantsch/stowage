@@ -47,7 +47,7 @@ describing how to reconstruct the file.
 | `-input` | — | File to store **(required)** |
 | `-manifest` | — | Path to write the manifest **(required)** |
 | `-compression` | `zstd` | `none` \| `gzip` \| `zstd` \| `lz4` |
-| `-encryption` | `aes256gcm` | `none` \| `aes256gcm` |
+| `-encryption` | `none` | `none` \| `aes256gcm` |
 | `-key` | — | Hex-encoded 32-byte MEK (required when encryption ≠ `none`) |
 | `-hash` | `blake3` | `sha256` \| `blake3` |
 | `-chunk-size` | `4194304` | Chunk size in bytes (default 4 MiB) |
