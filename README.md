@@ -4,6 +4,8 @@ Stowage is a Go document storage engine built around content-addressable blob
 storage. It is designed to store large files safely on a local filesystem and
 to provide the foundation for encrypted, compressed, chunked document storage.
 
+![Stowage Features](docs/images/stowage-features.jpeg "Stowage")
+
 The project separates physical storage from document processing:
 
 ```text
