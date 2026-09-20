@@ -7,7 +7,7 @@ help:	## Show this help.
 	@sed -ne '/@sed/!s/## //p' $(MAKEFILE_LIST)
 
 build:	## Build the project.
-	go build ./...
+	go build ./... -o stowage
 
 test:	## Test the project.
 	go test ./...
