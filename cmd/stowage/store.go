@@ -19,7 +19,7 @@ func runStore(args []string) error {
 	manifestPath := fs.String("manifest", "", "path to write manifest (required)")
 	root := fs.String("root", "", "BlobStore root directory (required)")
 	compression := fs.String("compression", "zstd", "compression algorithm: none|gzip|zstd|lz4")
-	encryption := fs.String("encryption", "aes256gcm", "encryption algorithm: none|aes256gcm")
+	encryption := fs.String("encryption", "none", "encryption algorithm: none|aes256gcm")
 	hashAlgo := fs.String("hash", "blake3", "hash algorithm: sha256|blake3")
 	chunkSize := fs.Int64("chunk-size", 4*1024*1024, "chunk size in bytes")
 	key := fs.String("key", "", "hex-encoded 32-byte MEK (required when encryption != none)")
