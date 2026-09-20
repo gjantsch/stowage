@@ -13,6 +13,27 @@ import (
 
 var binary string
 
+// runEnv is like run but also sets extra environment variables.
+func runEnv(t *testing.T, env []string, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	cmd := exec.Command(binary, args...)
+	cmd.Env = append(os.Environ(), env...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	stdout = outBuf.String()
+	stderr = errBuf.String()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else {
+			t.Fatalf("unexpected exec error: %v", err)
+		}
+	}
+	return
+}
+
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "stowage-e2e-*")
 	if err != nil {
@@ -373,5 +394,231 @@ func TestE2E_GC_RemovesOrphans(t *testing.T) {
 		if _, err := os.Stat(p); err == nil {
 			t.Errorf("orphan file still present: %s", name)
 		}
+	}
+}
+
+// TestE2E_Init creates a ~/.stowage file via the init subcommand.
+func TestE2E_Init(t *testing.T) {
+	fakeHome := t.TempDir()
+
+	stdout, stderr, code := runEnv(t, []string{"HOME=" + fakeHome}, "init")
+	if code != 0 {
+		t.Fatalf("init failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	cfgPath := filepath.Join(fakeHome, ".stowage")
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("config file not written: %v", err)
+	}
+	if !strings.Contains(string(data), "compression:") {
+		t.Errorf("config file missing 'compression:' field: %q", string(data))
+	}
+
+	// Second init must fail because the file already exists.
+	_, _, code = runEnv(t, []string{"HOME=" + fakeHome}, "init")
+	if code == 0 {
+		t.Error("second init should have failed but exited 0")
+	}
+}
+
+// TestE2E_ConfigFile_Root verifies that root set in ~/.stowage is used when -root is omitted.
+func TestE2E_ConfigFile_Root(t *testing.T) {
+	fakeHome := t.TempDir()
+	blobRoot := t.TempDir()
+	content := []byte("config-file root resolution test")
+	inputPath := writeFile(t, content)
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	outputPath := filepath.Join(t.TempDir(), "output")
+
+	cfg := fmt.Sprintf("root: %s\ncompression: none\nencryption: none\n", blobRoot)
+	if err := os.WriteFile(filepath.Join(fakeHome, ".stowage"), []byte(cfg), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+
+	env := []string{"HOME=" + fakeHome}
+
+	// No -root flag — must be resolved from config.
+	stdout, stderr, code := runEnv(t, env, "store",
+		"-input", inputPath,
+		"-manifest", manifestPath,
+	)
+	if code != 0 {
+		t.Fatalf("store failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = runEnv(t, env, "retrieve",
+		"-manifest", manifestPath,
+		"-output", outputPath,
+	)
+	if code != 0 {
+		t.Fatalf("retrieve failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile output: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("content mismatch")
+	}
+}
+
+// TestE2E_EnvKey verifies that STOWAGE_KEY is picked up without -key flag.
+func TestE2E_EnvKey(t *testing.T) {
+	blobRoot := t.TempDir()
+	content := []byte("env key test content")
+	inputPath := writeFile(t, content)
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	outputPath := filepath.Join(t.TempDir(), "output")
+	keyEnv := "STOWAGE_KEY=" + testMEKHex
+
+	stdout, stderr, code := runEnv(t, []string{keyEnv},
+		"store",
+		"-root", blobRoot,
+		"-input", inputPath,
+		"-manifest", manifestPath,
+		"-encryption", "aes256gcm",
+	)
+	if code != 0 {
+		t.Fatalf("store failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	stdout, stderr, code = runEnv(t, []string{keyEnv},
+		"retrieve",
+		"-root", blobRoot,
+		"-manifest", manifestPath,
+		"-output", outputPath,
+	)
+	if code != 0 {
+		t.Fatalf("retrieve failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile output: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("content mismatch after env-key round-trip")
+	}
+}
+
+// TestE2E_EncryptedFilename verifies that:
+//   - store writes EncryptedFilename into the manifest
+//   - retrieve auto-resolves output path from the decrypted filename
+func TestE2E_EncryptedFilename(t *testing.T) {
+	blobRoot := t.TempDir()
+	content := []byte("filename encryption test content")
+
+	// Create a file with a distinctive name.
+	inputDir := t.TempDir()
+	inputPath := filepath.Join(inputDir, "secret-document.txt")
+	if err := os.WriteFile(inputPath, content, 0o600); err != nil {
+		t.Fatalf("WriteFile input: %v", err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+
+	stdout, stderr, code := run(t,
+		"store",
+		"-root", blobRoot,
+		"-input", inputPath,
+		"-manifest", manifestPath,
+		"-encryption", "aes256gcm",
+		"-key", testMEKHex,
+		"-compression", "none",
+	)
+	if code != 0 {
+		t.Fatalf("store failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	// Verify the manifest does NOT contain the plaintext filename.
+	manifestData, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile manifest: %v", err)
+	}
+	if strings.Contains(string(manifestData), "secret-document.txt") {
+		t.Error("manifest contains plaintext filename — should be encrypted")
+	}
+	if !strings.Contains(string(manifestData), "encrypted_filename") {
+		t.Error("manifest missing 'encrypted_filename' field")
+	}
+
+	// Retrieve without -output; the binary should write to the original filename.
+	outDir := t.TempDir()
+	origCmd := exec.Command(binary, "retrieve",
+		"-root", blobRoot,
+		"-manifest", manifestPath,
+		"-key", testMEKHex,
+	)
+	origCmd.Dir = outDir
+	var outBuf, errBuf bytes.Buffer
+	origCmd.Stdout = &outBuf
+	origCmd.Stderr = &errBuf
+	if err := origCmd.Run(); err != nil {
+		t.Fatalf("retrieve failed:\nstdout: %s\nstderr: %s", outBuf.String(), errBuf.String())
+	}
+
+	stdout = outBuf.String()
+	if !strings.Contains(stdout, "secret-document.txt") {
+		t.Errorf("retrieve stdout should mention original filename, got: %q", stdout)
+	}
+
+	got, err := os.ReadFile(filepath.Join(outDir, "secret-document.txt"))
+	if err != nil {
+		t.Fatalf("ReadFile restored: %v", err)
+	}
+	if !bytes.Equal(got, content) {
+		t.Errorf("content mismatch after encrypted-filename round-trip")
+	}
+}
+
+// TestE2E_LogLevel_Silent verifies that -log-level silent suppresses slog output.
+func TestE2E_LogLevel_Silent(t *testing.T) {
+	blobRoot := t.TempDir()
+	content := []byte("log level test")
+	inputPath := writeFile(t, content)
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+
+	stdout, stderr, code := run(t,
+		"-log-level", "silent",
+		"store",
+		"-root", blobRoot,
+		"-input", inputPath,
+		"-manifest", manifestPath,
+		"-encryption", "none",
+	)
+	if code != 0 {
+		t.Fatalf("store failed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	// With silent level, stderr should have no slog lines (level=INFO etc.).
+	if strings.Contains(stderr, "level=") {
+		t.Errorf("expected no slog output with -log-level silent, got stderr: %q", stderr)
+	}
+}
+
+// TestE2E_DefaultEncryption_None verifies that omitting -encryption defaults to none (no key required).
+func TestE2E_DefaultEncryption_None(t *testing.T) {
+	blobRoot := t.TempDir()
+	content := []byte("no encryption default test")
+	inputPath := writeFile(t, content)
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+
+	// No -encryption flag, no -key flag, no STOWAGE_KEY env — should succeed.
+	stdout, stderr, code := run(t,
+		"store",
+		"-root", blobRoot,
+		"-input", inputPath,
+		"-manifest", manifestPath,
+	)
+	if code != 0 {
+		t.Fatalf("store without -encryption should default to none and succeed (exit %d):\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("ReadFile manifest: %v", err)
+	}
+	if !strings.Contains(string(data), `"none"`) && !strings.Contains(string(data), "none") {
+		t.Errorf("manifest encryption should be 'none', got: %s", data)
 	}
 }

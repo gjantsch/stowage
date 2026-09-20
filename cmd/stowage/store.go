@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	blobfs "github.com/gjantsch/stowage/internal/blobstore/fs"
@@ -13,33 +13,32 @@ import (
 	"github.com/gjantsch/stowage/internal/manifest"
 	pkgdocumentengine "github.com/gjantsch/stowage/pkg/documentengine"
 )
-func runStore(args []string) error {
+
+func runStore(args []string, cfg cliConfig) error {
 	fs := flag.NewFlagSet("store", flag.ContinueOnError)
 	input := fs.String("input", "", "path to file to store (required)")
 	manifestPath := fs.String("manifest", "", "path to write manifest (required)")
-	root := fs.String("root", "", "BlobStore root directory (required)")
-	compression := fs.String("compression", "zstd", "compression algorithm: none|gzip|zstd|lz4")
-	encryption := fs.String("encryption", "none", "encryption algorithm: none|aes256gcm")
-	hashAlgo := fs.String("hash", "blake3", "hash algorithm: sha256|blake3")
-	chunkSize := fs.Int64("chunk-size", 4*1024*1024, "chunk size in bytes")
-	key := fs.String("key", "", "hex-encoded 32-byte MEK (required when encryption != none)")
-	format := fs.String("format", "json", "manifest output format: json|yaml")
+	root := fs.String("root", "", "BlobStore root directory")
+	compression := fs.String("compression", "", "compression algorithm: none|gzip|zstd|lz4")
+	encryption := fs.String("encryption", "", "encryption algorithm: none|aes256gcm")
+	hashAlgo := fs.String("hash", "", "hash algorithm: sha256|blake3")
+	chunkSize := fs.Int64("chunk-size", 0, "chunk size in bytes")
+	key := fs.String("key", "", "hex-encoded 32-byte MEK")
+	format := fs.String("format", "", "manifest output format: json|yaml")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: stowage store -root <dir> -input <file> -manifest <file> [flags]
+		fmt.Fprintln(os.Stderr, `usage: stowage store -input <file> -manifest <file> [flags]
 
 Compress, encrypt, and chunk a file into the BlobStore. Writes a manifest that
 describes how to restore the file later.
 
 example:
   stowage store \
-    -root /data/blobs \
     -input photo.jpg \
     -manifest photo.json \
     -compression zstd \
     -encryption aes256gcm \
-    -key <64-hex-chars> \
-    -hash blake3
+    -key <64-hex-chars>
 
 flags:`)
 		fs.PrintDefaults()
@@ -49,40 +48,66 @@ flags:`)
 		return err
 	}
 
+	// Apply config defaults for unset flags.
+	if *root == "" {
+		*root = cfg.Root
+	}
+	if *compression == "" {
+		*compression = cfg.Compression
+	}
+	if *encryption == "" {
+		*encryption = cfg.Encryption
+	}
+	if *hashAlgo == "" {
+		*hashAlgo = cfg.Hash
+	}
+	if *chunkSize == 0 {
+		*chunkSize = cfg.ChunkSize
+	}
+	if *format == "" {
+		*format = cfg.Format
+	}
+
+	// Hardcoded fallbacks.
+	if *root == "" {
+		return fmt.Errorf("store: -root is required (or set 'root' in ~/.stowage)")
+	}
 	if *input == "" {
 		return fmt.Errorf("store: -input is required")
 	}
 	if *manifestPath == "" {
 		return fmt.Errorf("store: -manifest is required")
 	}
-	if *root == "" {
-		return fmt.Errorf("store: -root is required")
+	if *compression == "" {
+		*compression = "zstd"
+	}
+	if *encryption == "" {
+		*encryption = "none"
+	}
+	if *hashAlgo == "" {
+		*hashAlgo = "blake3"
+	}
+	if *chunkSize == 0 {
+		*chunkSize = 4 * 1024 * 1024
+	}
+	if *format == "" {
+		*format = "json"
 	}
 
-	var mek []byte
-	if manifest.EncryptionType(*encryption) != manifest.EncryptionNone {
-		if *key == "" {
-			return fmt.Errorf("store: -key is required when encryption is %q", *encryption)
-		}
-		decoded, err := hex.DecodeString(*key)
-		if err != nil {
-			return fmt.Errorf("store: -key is not valid hex: %w", err)
-		}
-		if len(decoded) != 32 {
-			return fmt.Errorf("store: -key must decode to exactly 32 bytes, got %d", len(decoded))
-		}
-		mek = decoded
+	mek, err := resolveKey(*key, *encryption)
+	if err != nil {
+		return fmt.Errorf("store: %w", err)
 	}
 
-	cfg := pkgdocumentengine.Config{
+	engineCfg := pkgdocumentengine.Config{
 		Compression: manifest.CompressionType(*compression),
 		Encryption:  manifest.EncryptionType(*encryption),
 		HashAlgo:    manifest.HashAlgorithm(*hashAlgo),
 		ChunkSize:   *chunkSize,
 	}
 
-	blobs := blobfs.NewFS(*root)
-	engine, err := documentengine.New(cfg, blobs)
+	blobs := blobfs.NewFSWithConfig(blobfsConfig(cfg, *root))
+	engine, err := documentengine.New(engineCfg, blobs)
 	if err != nil {
 		return fmt.Errorf("store: init engine: %w", err)
 	}
@@ -96,6 +121,15 @@ flags:`)
 	m, err := engine.Store(context.Background(), f, mek)
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
+	}
+
+	// Encrypt the original filename when encryption is active.
+	if mek != nil {
+		enc, err := encryptFilename(filepath.Base(*input), mek)
+		if err != nil {
+			return fmt.Errorf("store: encrypt filename: %w", err)
+		}
+		m.EncryptedFilename = enc
 	}
 
 	var data []byte
