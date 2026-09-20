@@ -11,21 +11,19 @@ import (
 	pkgdocumentengine "github.com/gjantsch/stowage/pkg/documentengine"
 )
 
-func runErase(args []string) error {
+func runErase(args []string, cfg cliConfig) error {
 	fs := flag.NewFlagSet("erase", flag.ContinueOnError)
 	manifestPath := fs.String("manifest", "", "path to manifest file (required)")
-	root := fs.String("root", "", "BlobStore root directory (required)")
+	root := fs.String("root", "", "BlobStore root directory")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: stowage erase -root <dir> -manifest <file>
+		fmt.Fprintln(os.Stderr, `usage: stowage erase -manifest <file> [flags]
 
 Remove all BlobStore chunks referenced by a manifest. Each chunk is erased
 using LIFO slot removal. The manifest file itself is not deleted.
 
 example:
-  stowage erase \
-    -root /data/blobs \
-    -manifest photo.json
+  stowage erase -manifest photo.json
 
 flags:`)
 		fs.PrintDefaults()
@@ -35,11 +33,14 @@ flags:`)
 		return err
 	}
 
-	if *manifestPath == "" {
-		return fmt.Errorf("erase: -manifest is required")
+	if *root == "" {
+		*root = cfg.Root
 	}
 	if *root == "" {
-		return fmt.Errorf("erase: -root is required")
+		return fmt.Errorf("erase: -root is required (or set 'root' in ~/.stowage)")
+	}
+	if *manifestPath == "" {
+		return fmt.Errorf("erase: -manifest is required")
 	}
 
 	m, err := readManifest(*manifestPath)
@@ -47,14 +48,12 @@ flags:`)
 		return fmt.Errorf("erase: read manifest: %w", err)
 	}
 
-	// Build engine from manifest fields.
-	cfg := pkgdocumentengine.Config{
+	engineCfg := pkgdocumentengine.Config{
 		Compression: m.Compression,
 		Encryption:  m.Encryption,
 		HashAlgo:    m.HashAlgorithm,
 	}
-	blobs := blobfs.NewFS(*root)
-	engine, err := documentengine.New(cfg, blobs)
+	engine, err := documentengine.New(engineCfg, blobfs.NewFSWithConfig(blobfsConfig(cfg, *root)))
 	if err != nil {
 		return fmt.Errorf("erase: init engine: %w", err)
 	}

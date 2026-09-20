@@ -9,12 +9,12 @@ import (
 	blobfs "github.com/gjantsch/stowage/internal/blobstore/fs"
 )
 
-func runGC(args []string) error {
+func runGC(args []string, cfg cliConfig) error {
 	fs := flag.NewFlagSet("gc", flag.ContinueOnError)
-	root := fs.String("root", "", "BlobStore root directory (required)")
+	root := fs.String("root", "", "BlobStore root directory")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: stowage gc -root <dir>
+		fmt.Fprintln(os.Stderr, `usage: stowage gc [flags]
 
 Scan the BlobStore root directory and remove any orphaned temporary files
 (_tmp_*) and stale lock files (_lock_*) left by interrupted operations.
@@ -31,7 +31,10 @@ flags:`)
 	}
 
 	if *root == "" {
-		return fmt.Errorf("gc: -root is required")
+		*root = cfg.Root
+	}
+	if *root == "" {
+		return fmt.Errorf("gc: -root is required (or set 'root' in ~/.stowage)")
 	}
 
 	deleted, err := blobfs.NewFS(*root).GC(context.Background())

@@ -2,36 +2,34 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	blobfs "github.com/gjantsch/stowage/internal/blobstore/fs"
 	documentengine "github.com/gjantsch/stowage/internal/documentengine"
 	"github.com/gjantsch/stowage/internal/manifest"
+	"github.com/gjantsch/stowage/pkg/blobstore"
 	pkgdocumentengine "github.com/gjantsch/stowage/pkg/documentengine"
 )
 
-func runRetrieve(args []string) error {
+func runRetrieve(args []string, cfg cliConfig) error {
 	fs := flag.NewFlagSet("retrieve", flag.ContinueOnError)
 	manifestPath := fs.String("manifest", "", "path to manifest file (required)")
-	output := fs.String("output", "", "path to write restored file (required)")
-	root := fs.String("root", "", "BlobStore root directory (required)")
-	key := fs.String("key", "", "hex-encoded 32-byte MEK (required when manifest uses encryption)")
+	output := fs.String("output", "", "path to write restored file (defaults to original filename when available)")
+	root := fs.String("root", "", "BlobStore root directory")
+	key := fs.String("key", "", "hex-encoded 32-byte MEK")
 
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, `usage: stowage retrieve -root <dir> -manifest <file> -output <file> [flags]
+		fmt.Fprintln(os.Stderr, `usage: stowage retrieve -manifest <file> [flags]
 
 Restore a file from BlobStore using its manifest. Verifies the integrity hash
 after reassembly and returns an error if the content has been tampered with.
 
 example:
   stowage retrieve \
-    -root /data/blobs \
     -manifest photo.json \
     -output photo_restored.jpg \
     -key <64-hex-chars>
@@ -44,14 +42,14 @@ flags:`)
 		return err
 	}
 
-	if *manifestPath == "" {
-		return fmt.Errorf("retrieve: -manifest is required")
-	}
-	if *output == "" {
-		return fmt.Errorf("retrieve: -output is required")
+	if *root == "" {
+		*root = cfg.Root
 	}
 	if *root == "" {
-		return fmt.Errorf("retrieve: -root is required")
+		return fmt.Errorf("retrieve: -root is required (or set 'root' in ~/.stowage)")
+	}
+	if *manifestPath == "" {
+		return fmt.Errorf("retrieve: -manifest is required")
 	}
 
 	m, err := readManifest(*manifestPath)
@@ -59,29 +57,34 @@ flags:`)
 		return fmt.Errorf("retrieve: read manifest: %w", err)
 	}
 
-	var mek []byte
-	if m.Encryption != manifest.EncryptionNone {
-		if *key == "" {
-			return fmt.Errorf("retrieve: -key is required (manifest uses %q encryption)", m.Encryption)
-		}
-		decoded, err := hex.DecodeString(*key)
-		if err != nil {
-			return fmt.Errorf("retrieve: -key is not valid hex: %w", err)
-		}
-		if len(decoded) != 32 {
-			return fmt.Errorf("retrieve: -key must decode to exactly 32 bytes, got %d", len(decoded))
-		}
-		mek = decoded
+	mek, err := resolveKey(*key, string(m.Encryption))
+	if err != nil {
+		return fmt.Errorf("retrieve: %w", err)
 	}
 
-	// Build engine from manifest fields so algorithms always match what was stored.
-	cfg := pkgdocumentengine.Config{
+	// Resolve output path: flag → decrypted filename → error.
+	outputPath := *output
+	var originalName string
+	if mek != nil && len(m.EncryptedFilename) > 0 {
+		originalName, err = decryptFilename([]byte(m.EncryptedFilename), mek)
+		if err != nil {
+			return fmt.Errorf("retrieve: decrypt filename: %w", err)
+		}
+	}
+	if outputPath == "" {
+		if originalName != "" {
+			outputPath = originalName
+		} else {
+			return fmt.Errorf("retrieve: -output is required (manifest has no encrypted filename)")
+		}
+	}
+
+	engineCfg := pkgdocumentengine.Config{
 		Compression: m.Compression,
 		Encryption:  m.Encryption,
 		HashAlgo:    m.HashAlgorithm,
 	}
-	blobs := blobfs.NewFS(*root)
-	engine, err := documentengine.New(cfg, blobs)
+	engine, err := documentengine.New(engineCfg, blobfs.NewFSWithConfig(blobfsConfig(cfg, *root)))
 	if err != nil {
 		return fmt.Errorf("retrieve: init engine: %w", err)
 	}
@@ -91,22 +94,21 @@ flags:`)
 		return fmt.Errorf("retrieve: %w", err)
 	}
 
-	out, err := os.Create(*output)
+	outFile, err := os.Create(outputPath)
 	if err != nil {
 		rc.Close()
 		return fmt.Errorf("retrieve: create output file: %w", err)
 	}
 
-	if _, err := io.Copy(out, rc); err != nil {
-		out.Close()
+	if _, err := io.Copy(outFile, rc); err != nil {
+		outFile.Close()
 		rc.Close()
 		return fmt.Errorf("retrieve: write output: %w", err)
 	}
-	if err := out.Close(); err != nil {
+	if err := outFile.Close(); err != nil {
 		rc.Close()
 		return fmt.Errorf("retrieve: close output: %w", err)
 	}
-
 	if err := rc.Close(); err != nil {
 		if errors.Is(err, pkgdocumentengine.ErrIntegrityMismatch) {
 			return fmt.Errorf("retrieve: integrity check failed — file may be corrupted: %w", err)
@@ -114,7 +116,11 @@ flags:`)
 		return fmt.Errorf("retrieve: close reader: %w", err)
 	}
 
-	fmt.Printf("retrieved: %d chunks, integrity ok\n", len(m.Chunks))
+	if originalName != "" {
+		fmt.Printf("retrieved: %d chunks, integrity ok (original: %s)\n", len(m.Chunks), originalName)
+	} else {
+		fmt.Printf("retrieved: %d chunks, integrity ok\n", len(m.Chunks))
+	}
 	return nil
 }
 
@@ -125,9 +131,18 @@ func readManifest(path string) (*manifest.Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	lower := strings.ToLower(path)
-	if strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml") {
+	switch {
+	case len(path) > 5 && (path[len(path)-5:] == ".yaml" || path[len(path)-4:] == ".yml"):
 		return manifest.FromYAML(data)
+	default:
+		return manifest.FromJSON(data)
 	}
-	return manifest.FromJSON(data)
+}
+
+// blobfsConfig builds a blobstore.Config from CLI config and resolved root.
+func blobfsConfig(cfg cliConfig, root string) blobstore.Config {
+	return blobstore.Config{
+		RootDir:     root,
+		Deduplicate: cfg.Deduplicate,
+	}
 }

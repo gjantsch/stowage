@@ -97,6 +97,10 @@ type Manifest struct {
 	// EncryptedDEK holds the Data Encryption Key encrypted with the caller's MEK.
 	// Empty when Encryption is EncryptionNone.
 	EncryptedDEK Base64Bytes `json:"encrypted_dek,omitempty" yaml:"encrypted_dek,omitempty"`
+	// EncryptedFilename is the original file base name encrypted with the MEK
+	// using AES-256-GCM (nonce || ciphertext+tag, base64-encoded).
+	// Nil when Encryption is EncryptionNone or when no filename was provided.
+	EncryptedFilename Base64Bytes `json:"encrypted_filename,omitempty" yaml:"encrypted_filename,omitempty"`
 	// IntegrityHash is the hash of the original plaintext stream, computed
 	// before compression and encryption. Verified on full retrieval.
 	IntegrityHash blobstore.Hash32 `json:"integrity_hash" yaml:"integrity_hash"`
