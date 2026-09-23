@@ -128,11 +128,10 @@ engine log calls remain unchanged.
 
 ### Motivation
 
-The filename is sensitive metadata. A manifest directory whose files are named
-`bank-investments.xls`, `my-secret-passwords`, or `personal-diary.docx` is a map
-of everything worth stealing — even if the file bytes are completely opaque. An
-attacker who obtains the manifests should learn nothing: not the content, not the
-file type, not whether the data is worth pursuing.
+The filename is sensitive metadata or a map of everything worth stealing — even if
+the file bytes are completely opaque. An attacker who obtains the manifests should 
+learn nothing: not the content, not the file type, not whether the data is worth 
+pursuing.
 
 The solution is to encrypt the original filename using the same MEK that protects
 the file content, and store the result in the manifest.
